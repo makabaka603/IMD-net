@@ -1,0 +1,31 @@
+seed: 123
+train_input_dir: datasets/MDIR/train/input
+train_target_dir: datasets/MDIR/train/target
+val_input_dir: datasets/MDIR/val/input
+val_target_dir: datasets/MDIR/val/target
+save_dir: checkpoints
+
+model:
+  img_channel: 3
+  width: 32
+  enc_blk_nums: [4, 4, 4, 8]
+  middle_blk_num: 8
+  dec_blk_nums: [2, 2, 2, 2]
+  branch_num: 4
+  tau: 0.2
+
+train:
+  patch_size: 256
+  batch_size: 4
+  num_workers: 4
+  iterations: 400000
+  lr: 0.0002
+  min_lr: 0.0000001
+  val_every: 2000
+  save_every: 2000
+  amp: true
+
+loss:
+  lambda_fft: 0.1
+  delta_edge: 0.05
+  gamma_decouple: 0.001
