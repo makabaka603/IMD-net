@@ -23,18 +23,14 @@ class IMDNet(nn.Module):
         self.ending = nn.Conv2d(width, img_channel, 3, 1, 1)
 
         channels = [width, width * 2, width * 4, width * 8]
-        # Encoder with multi-input mechanism (Paper Eq. 1):
-        # each DIDStage receives downsampled degraded image processed by Convs
         self.encoders = nn.ModuleList([
             DIDStage(ch, n, img_channel) for ch, n in zip(channels, enc_blk_nums)
         ])
         self.downs = nn.ModuleList([ConvDown(channels[i], channels[i + 1]) for i in range(3)])
         self.middle = DIDStage(channels[-1], middle_blk_num, img_channel)
 
-        # Decoder from deepest to shallowest: 256->128->64->32 when width=32
-        dec_channels = list(reversed(channels))  # [256, 128, 64, 32]
-        # Include middle block DI channels in FBlock fusion (Paper: multi-scale DI aggregation)
-        di_channels = list(channels) + [channels[-1]]  # [32, 64, 128, 256, 256]
+        dec_channels = list(reversed(channels))
+        di_channels = list(channels) + [channels[-1]]
         self.fblocks = nn.ModuleList([
             FBlock(di_channels, ch) for ch in dec_channels
         ])
@@ -47,14 +43,14 @@ class IMDNet(nn.Module):
         self.decoders = nn.ModuleList([
             TAStage(ch, n, branch_num, tau) for ch, n in zip(dec_channels, dec_blk_nums)
         ])
+        # Side outputs at native decoder scales for multi-scale supervision
         self.side_out = nn.ModuleList([nn.Conv2d(ch, img_channel, 3, 1, 1) for ch in dec_channels])
 
     def forward(self, inp: torch.Tensor, return_aux: bool = False):
         x, h, w = pad_to_multiple(inp, 16)
         feat = self.intro(x)
 
-        # Generate multi-scale degraded inputs for the multi-input mechanism
-        # (Paper: "Low-resolution degraded images are introduced into the main path")
+        # Multi-scale degraded inputs
         degraded_scales = [x]
         for _ in range(3):
             degraded_scales.append(
@@ -70,10 +66,7 @@ class IMDNet(nn.Module):
             if i < len(self.downs):
                 feat = self.downs[i](feat)
 
-        # Middle block also receives lowest-res degraded input
         feat, cf_mid, di_mid = self.middle(feat, degraded_scales[-1])
-
-        # Include middle block DI for multi-scale fusion (Paper: aggregate DI across all levels)
         di_all = di_list + [di_mid]
 
         dec_feats = []
@@ -83,7 +76,6 @@ class IMDNet(nn.Module):
         out = feat
 
         for i, dec in enumerate(self.decoders):
-            # Align with corresponding clean skip feature
             skip = rev_cf[i]
             if out.shape[-2:] != skip.shape[-2:]:
                 out = F.interpolate(out, size=skip.shape[-2:], mode='bilinear', align_corners=False)
@@ -92,16 +84,15 @@ class IMDNet(nn.Module):
             out, gates = dec(out, fused_di)
             dec_feats.append(out)
             gate_maps.extend(gates)
+            # Side output at native decoder scale (multi-scale supervision)
             side = self.side_out[i](out)
-            side = F.interpolate(side, size=x.shape[-2:], mode='bilinear', align_corners=False)
-            side_outputs.append(side + x)
+            side_outputs.append(side)  # no resize -- loss will downsample target
             if i < len(self.up_after_stage):
                 out = self.up_after_stage[i](out)
 
         residual = self.ending(out)
         restored = residual + x
         restored = restored[:, :, :h, :w]
-        side_outputs = [s[:, :, :h, :w] for s in side_outputs]
 
         if return_aux:
             return {

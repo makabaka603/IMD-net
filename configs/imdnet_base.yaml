@@ -1,4 +1,4 @@
-seed: 123
+﻿seed: 123
 train_input_dir: datasets/MDIR/train/input
 train_target_dir: datasets/MDIR/train/target
 val_input_dir: datasets/MDIR/val/input
@@ -17,6 +17,7 @@ model:
 train:
   patch_size: 256
   batch_size: 4
+  accumulation_steps: 8     # effective batch = 4 x 8 = 32
   num_workers: 4
   iterations: 400000
   lr: 0.0002

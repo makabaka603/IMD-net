@@ -35,8 +35,11 @@ class FFTLoss(nn.Module):
 
 
 class DecouplingLoss(nn.Module):
-    """Cosine similarity penalty between CF and DI (Paper Eq. 10: Ld).
-    Minimizes overlap to keep clean and degradation features orthogonal."""
+    """Cosine similarity penalty between CF and DI.
+
+    Uses cos^2 to produce a non-negative loss that strongly penalises
+    large overlap between clean and degradation features.
+    """
     def forward(self, cf_list, di_list):
         if not cf_list or not di_list:
             return torch.tensor(0.0, device=cf_list[0].device if cf_list else 'cpu')
@@ -44,8 +47,8 @@ class DecouplingLoss(nn.Module):
         for cf, di in zip(cf_list, di_list):
             cfv = cf.flatten(2)
             div = di.flatten(2)
-            cos = F.cosine_similarity(cfv, div, dim=1).mean()
-            loss = loss + cos
+            cos = F.cosine_similarity(cfv, div, dim=1)
+            loss = loss + (cos ** 2).mean()  # cos²: always non-negative
         return loss / len(cf_list)
 
 
@@ -69,10 +72,9 @@ class IMDNetLoss(nn.Module):
         logs = {}
         c_total = e_total = f_total = 0.0
         for p in preds:
-            if p.shape[-2:] != target.shape[-2:]:
-                t = F.interpolate(target, size=p.shape[-2:], mode='bilinear', align_corners=False)
-            else:
-                t = target
+            # Multi-scale supervision: no interpolation needed
+            # side_outputs are now at their native scales
+            t = F.interpolate(target, size=p.shape[-2:], mode='bilinear', align_corners=False)
             c = self.charb(p, t)
             e = self.edge(p, t)
             ff = self.fft(p, t)

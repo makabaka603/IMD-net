@@ -19,8 +19,8 @@ class FunctionalBranch(nn.Module):
 class TABlock(nn.Module):
     """Task Adaptation Block with sparse branch activation (Paper Eq. 5-9).
 
-    Degradation-aware context injection, branch gating with thresholded fusion.
-    Multiple activated branches accumulate their contributions.
+    - Training: soft gating (all branches contribute with learned weights).
+    - Inference: true sparse activation (branches below tau are skipped).
     """
     def __init__(self, channels: int, branch_num: int = 4, tau: float = 0.2):
         super().__init__()
@@ -44,11 +44,19 @@ class TABlock(nn.Module):
         dc = self.context(self.norm(x)) + self.di_proj(di)
         y = self.general(dc + x)
         weights = self.gate(dc)  # B,N,1,1
-        for i, branch in enumerate(self.branches):
-            wi = weights[:, i:i+1]
-            mask = (wi >= self.tau).to(y.dtype)
-            # Accumulate activated branch outputs (fix: replaced replacement with accumulation)
-            y = y + mask * wi * branch(y)
+
+        if self.training:
+            # Soft gating: all branches contribute, weighted by gate scores
+            for i, branch in enumerate(self.branches):
+                wi = weights[:, i:i+1]
+                y = y + wi * branch(y)
+        else:
+            # Hard / true sparse activation: skip branches below tau
+            for i, branch in enumerate(self.branches):
+                wi = weights[:, i:i+1]
+                mask = (wi >= self.tau).to(y.dtype)
+                y = y + mask * wi * branch(y)
+
         return x + self.out(y), weights
 
 

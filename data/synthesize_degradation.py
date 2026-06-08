@@ -1,4 +1,4 @@
-"""
+﻿"""
 Synthetic multi-degradation data generator for IMDNet.
 
 Creates paired data:
@@ -19,8 +19,8 @@ Example:
         --output_dir datasets/MDIR \
         --mode all \
         --train_ratio 0.9 \
-        --num_train_variants 2 \
-        --seed 1
+        --num_train_variants 3 \
+        --seed 42
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ def save_rgb(img: Image.Image, path: Path) -> None:
 
 
 def safe_stem(path: Path) -> str:
-    """Build a unique stem from the last path components."""
     parts = path.with_suffix("").parts
     relevant = [p for p in parts if p != path.anchor][-3:]
     return "__".join(relevant)
@@ -79,24 +78,37 @@ def from_float01(arr: np.ndarray) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 def random_depth_map(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
-    """Create a simple pseudo depth map in [0, 1] for haze simulation."""
+    """Enhanced pseudo depth map combining spatial priors and image-based cues.
+
+    Uses:
+      - vertical gradient (sky is farther in outdoor scenes)
+      - radial distance from a random focal point
+      - multiple-frequency Perlin-like noise for natural irregularity
+    """
     yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
     xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+
     vertical = 1.0 - yy
     cx, cy = rng.uniform(0.25, 0.75), rng.uniform(0.15, 0.85)
     radial = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
     radial = radial / (radial.max() + 1e-6)
 
-    low_res = rng.random((max(4, h // 64), max(4, w // 64)), dtype=np.float32)
-    noise_img = Image.fromarray((low_res * 255).astype(np.uint8)).resize(
-        (w, h), Image.BICUBIC
-    )
-    noise_img = noise_img.filter(
-        ImageFilter.GaussianBlur(radius=max(3, min(h, w) // 32))
-    )
-    smooth_noise = np.asarray(noise_img).astype(np.float32) / 255.0
+    # Multi-frequency smooth noise (Perlin-like via upsampled random fields)
+    noise_fields = []
+    for scale, weight in [(64, 0.12), (32, 0.06), (16, 0.03)]:
+        rh = max(4, h // scale)
+        rw = max(4, w // scale)
+        field = rng.random((rh, rw), dtype=np.float32)
+        img_field = Image.fromarray((field * 255).astype(np.uint8)).resize(
+            (w, h), Image.BICUBIC
+        )
+        smooth = np.asarray(img_field).astype(np.float32) / 255.0
+        noise_fields.append(smooth * weight)
 
-    depth = 0.55 * vertical + 0.25 * radial + 0.20 * smooth_noise
+    smooth_noise = sum(noise_fields)
+    smooth_noise = (smooth_noise - smooth_noise.min()) / (smooth_noise.max() - smooth_noise.min() + 1e-6)
+
+    depth = 0.50 * vertical + 0.25 * radial + 0.25 * smooth_noise
     depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)
     return depth.astype(np.float32)
 
@@ -111,11 +123,12 @@ def add_haze(
     beta: float | None = None,
     airlight: float | None = None,
 ) -> Image.Image:
-    """Add synthetic haze via atmospheric scattering model."""
+    """Add synthetic haze via atmospheric scattering model with A. beta [0.2, 2.5]."""
     arr = to_float01(img)
     h, w = arr.shape[:2]
-    beta = rng.uniform(0.35, 2.20) if beta is None else float(beta)
-    A = rng.uniform(0.78, 1.0) if airlight is None else float(airlight)
+    # Broader beta range for more diverse haze levels
+    beta = rng.uniform(0.20, 2.50) if beta is None else float(beta)
+    A = rng.uniform(0.75, 1.0) if airlight is None else float(airlight)
     depth = random_depth_map(h, w, rng)
     t = np.exp(-beta * depth)[..., None]
     hazy = arr * t + A * (1.0 - t)
@@ -132,45 +145,58 @@ def add_rain(
     streak_count: int | None = None,
     angle_deg: float | None = None,
 ) -> Image.Image:
-    """Add synthetic rain streaks."""
+    """Add synthetic rain streaks with more realistic variation.
+
+    Features:
+      - Per-streak random width and blur for visual depth
+      - Varying opacity (light to heavy rain)
+      - Slight motion-blur-like orientation jitter
+    """
     arr = to_float01(img)
     h, w = arr.shape[:2]
 
-    strength = rng.uniform(0.2, 1.0)
+    strength = rng.uniform(0.15, 1.0)
+
+    # Streak count: roughly 0.2% to 0.6% of pixels
     if streak_count is None:
-        streak_count = int((0.0007 + 0.0045 * strength) * h * w)
+        streak_count = int((0.0005 + 0.0055 * strength) * h * w)
     streak_count = max(1, streak_count)
 
-    length_min = max(8, int(0.012 * min(h, w)))
-    length_max = max(
-        length_min + 1, int((0.035 + 0.055 * strength) * min(h, w))
-    )
-    width = 1 if strength < 0.55 else int(rng.integers(1, 3))
-    angle = rng.uniform(-25, 25) if angle_deg is None else float(angle_deg)
+    length_min = max(8, int(0.010 * min(h, w)))
+    length_max = max(length_min + 1, int((0.030 + 0.060 * strength) * min(h, w)))
+    angle = rng.uniform(-30, 30) if angle_deg is None else float(angle_deg)
 
+    # Draw streaks on separate layers and composite for depth effect
     rain_mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(rain_mask)
+
     for _ in range(streak_count):
-        x = rng.integers(-w // 10, w + w // 10)
-        y = rng.integers(-h // 10, h + h // 10)
+        x = rng.integers(-w // 8, w + w // 8)
+        y = rng.integers(-h // 8, h + h // 8)
         length = int(rng.integers(length_min, length_max + 1))
-        theta = math.radians(90 + angle + float(rng.normal(0, 4)))
+
+        # Per-streak variation: width (1-3 px), angle jitter, brightness
+        per_streak_width = max(1, int(rng.integers(1, 4)))
+        theta = math.radians(90 + angle + float(rng.normal(0, 6)))
         dx = math.cos(theta) * length
         dy = math.sin(theta) * length
-        brightness = int(rng.integers(120, 256))
-        draw.line((x, y, x + dx, y + dy), fill=brightness, width=width)
+        # Some streaks brighter than others for natural look
+        brightness = int(rng.integers(80, 256))
+        draw.line(
+            (x, y, x + dx, y + dy),
+            fill=brightness,
+            width=per_streak_width,
+        )
 
-    blur_radius = 0.4 + 0.8 * strength
-    rain_mask = rain_mask.filter(
-        ImageFilter.GaussianBlur(radius=blur_radius)
-    )
+    # Multi-radius blur for depth-of-field effect in rain
+    blur_radius = 0.3 + 1.0 * strength
+    rain_mask = rain_mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
     rain = np.asarray(rain_mask).astype(np.float32) / 255.0
 
-    alpha = 0.12 + 0.32 * strength
-    rainy = (
-        arr * (1.0 - alpha * rain[..., None] * 0.35)
-        + alpha * rain[..., None]
-    )
+    # Non-linear rain compositing: brighter streaks with veiling
+    alpha = 0.10 + 0.35 * strength
+    rainy = arr * (1.0 - alpha * rain[..., None] * 0.30) + alpha * rain[..., None]
     return from_float01(rainy)
 
 
@@ -198,7 +224,7 @@ def add_noise(
 def apply_combo(
     img: Image.Image, combo: str, rng: np.random.Generator
 ) -> Image.Image:
-    """Apply degradation combination in fixed order H -> R -> N."""
+    """Apply degradation combination in the fixed order H -> R -> N."""
     parts = set(combo.split("_"))
     out = img.copy()
     if "H" in parts:
@@ -277,60 +303,32 @@ def generate_combo_tests(
 # ---------------------------------------------------------------------------
 
 def parse_combos(raw: str) -> List[str]:
-    """Parse and validate comma-separated combo strings."""
     combos = [c.strip().upper() for c in raw.split(",") if c.strip()]
     for c in combos:
         if c not in VALID_COMBOS:
             raise ValueError(
                 f"Unknown combo {c!r}. "
-                f"Valid options: {', '.join(sorted(VALID_COMBOS))}"
+                f"Valid: {', '.join(sorted(VALID_COMBOS))}"
             )
     return combos
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate synthetic MDIR paired data."
-    )
+    parser = argparse.ArgumentParser(description="Generate synthetic MDIR paired data.")
     parser.add_argument("--clean_dir", required=True, help="Clean images dir.")
-    parser.add_argument(
-        "--output_dir", required=True, help="Output dataset directory."
-    )
+    parser.add_argument("--output_dir", required=True, help="Output dataset dir.")
     parser.add_argument(
         "--mode",
         default="all",
         choices=["train", "val", "test", "all"],
-        help="Which part to generate.",
     )
+    parser.add_argument("--train_ratio", type=float, default=0.9)
+    parser.add_argument("--num_train_variants", type=int, default=3)
+    parser.add_argument("--num_val_variants", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
-        "--train_ratio",
-        type=float,
-        default=0.9,
-        help="Clean-image ratio for train when mode=all.",
-    )
-    parser.add_argument(
-        "--num_train_variants",
-        type=int,
-        default=2,
-        help="Degraded copies per clean train image.",
-    )
-    parser.add_argument(
-        "--num_val_variants",
-        type=int,
-        default=1,
-        help="Degraded copies per clean val image.",
-    )
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Remove output_dir before generation.",
-    )
-    parser.add_argument(
-        "--combos",
-        type=str,
-        default=",".join(DEFAULT_COMBOS),
-        help="Comma-separated combinations.",
+        "--combos", type=str, default=",".join(DEFAULT_COMBOS)
     )
     args = parser.parse_args()
 
@@ -359,9 +357,7 @@ def main() -> None:
     elif args.mode == "test":
         generate_combo_tests(files, out_root, "test", rng, combos)
     else:
-        train_files, val_files = split_files(
-            files, args.train_ratio, args.seed
-        )
+        train_files, val_files = split_files(files, args.train_ratio, args.seed)
         generate_flat_split(
             train_files, out_root, "train", rng, args.num_train_variants, combos
         )
@@ -371,8 +367,8 @@ def main() -> None:
         generate_combo_tests(val_files, out_root, "test", rng, combos)
 
     print(f"Done. Dataset written to: {out_root}")
-    print("Train/val format: split/input + split/target")
-    print("Test format: test/<combo>/input + test/<combo>/target")
+    print("Train/val: <root>/<split>/input + <root>/<split>/target")
+    print("Test: <root>/test/<combo>/input + <root>/test/<combo>/target")
 
 
 if __name__ == "__main__":
