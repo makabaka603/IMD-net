@@ -1,4 +1,4 @@
-ï»¿import torch
+import torch
 import torch.nn as nn
 from .layers import LayerNorm2d, SimpleGate, SCA
 
@@ -45,17 +45,18 @@ class TABlock(nn.Module):
         y = self.general(dc + x)
         weights = self.gate(dc)  # B,N,1,1
 
-        if self.training:
-            # Soft gating: all branches contribute, weighted by gate scores
-            for i, branch in enumerate(self.branches):
-                wi = weights[:, i:i+1]
+        # Training: soft gating (all branches contribute)
+        # Inference: true sparse ¡ª skip branches below tau entirely
+        for i, branch in enumerate(self.branches):
+            wi = weights[:, i:i+1]
+            if self.training:
                 y = y + wi * branch(y)
-        else:
-            # Hard / true sparse activation: skip branches below tau
-            for i, branch in enumerate(self.branches):
-                wi = weights[:, i:i+1]
-                mask = (wi >= self.tau).to(y.dtype)
-                y = y + mask * wi * branch(y)
+            else:
+                # Truly skip: don't compute branch(y) if no sample activates it
+                batch_active = (wi >= self.tau)
+                if batch_active.any():
+                    mask = batch_active.to(y.dtype)
+                    y = y + mask * wi * branch(y)
 
         return x + self.out(y), weights
 

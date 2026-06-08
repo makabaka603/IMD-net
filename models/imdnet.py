@@ -1,4 +1,4 @@
-﻿import torch
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .layers import ConvDown, PixelShuffleUp, pad_to_multiple
@@ -84,9 +84,10 @@ class IMDNet(nn.Module):
             out, gates = dec(out, fused_di)
             dec_feats.append(out)
             gate_maps.extend(gates)
-            # Side output at native decoder scale (multi-scale supervision)
+            # Multi-scale side output with degraded input residual
             side = self.side_out[i](out)
-            side_outputs.append(side)  # no resize -- loss will downsample target
+            side_input = F.interpolate(x, size=side.shape[-2:], mode='bilinear', align_corners=False)
+            side_outputs.append(side + side_input)
             if i < len(self.up_after_stage):
                 out = self.up_after_stage[i](out)
 

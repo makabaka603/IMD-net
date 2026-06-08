@@ -1,4 +1,4 @@
-﻿# IMDNet PyTorch Reimplementation (modular)
+# IMDNet PyTorch Reimplementation (modular)
 
 This is a clean, runnable PyTorch implementation of **Learning to Restore Multi-Degraded Images via Ingredient Decoupling and Task-Aware Path Adaptation**.
 

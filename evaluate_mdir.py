@@ -1,4 +1,4 @@
-﻿"""
+"""
 Per-combo evaluation for IMDNet on the MDIR benchmark.
 
 Evaluates the model on all 7 degradation combinations:

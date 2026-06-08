@@ -1,4 +1,4 @@
-﻿import os
+import os
 import argparse
 import yaml
 from tqdm import tqdm
@@ -51,8 +51,10 @@ def main():
 
     model = build_model(cfg).to(device)
     criterion = IMDNetLoss(**cfg['loss']).to(device)
-    optim = Adam(model.parameters(), lr=cfg['train']['lr'] * acc_steps, betas=(0.9, 0.999))
-    sched = CosineAnnealingLR(optim, T_max=cfg['train']['iterations'], eta_min=cfg['train']['min_lr'])
+    optim = Adam(model.parameters(), lr=cfg['train']['lr'], betas=(0.9, 0.999))
+    # Scheduler cycles over optimizer steps (iterations / acc_steps)
+    total_opt_steps = cfg['train']['iterations'] // acc_steps
+    sched = CosineAnnealingLR(optim, T_max=total_opt_steps, eta_min=cfg['train']['min_lr'])
     scaler = torch.cuda.amp.GradScaler(enabled=cfg['train'].get('amp', True) and device == 'cuda')
 
     start_iter = 0

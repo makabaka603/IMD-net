@@ -1,4 +1,4 @@
-﻿seed: 123
+seed: 123
 train_input_dir: datasets/MDIR/train/input
 train_target_dir: datasets/MDIR/train/target
 val_input_dir: datasets/MDIR/val/input

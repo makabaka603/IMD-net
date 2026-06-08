@@ -1,4 +1,4 @@
-﻿import os
+import os
 import argparse
 from glob import glob
 import torch

@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import torch
 from models import IMDNet
 

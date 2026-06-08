@@ -1,4 +1,4 @@
-﻿"""
+"""
 Synthetic multi-degradation data generator for IMDNet.
 
 Creates paired data:
