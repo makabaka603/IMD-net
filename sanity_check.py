@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+
 """
 Quick sanity check for IMDNet training setup.
 
@@ -12,6 +15,9 @@ Usage:
     python sanity_check.py                                      # use default config
     python sanity_check.py --config configs/imdnet_base.yaml    # custom config
     python sanity_check.py --resume checkpoints/imdnet_best.pth # also load checkpoint
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+
 """
 
 import argparse
@@ -282,7 +288,7 @@ def check_end2end(cfg: dict, model: nn.Module) -> None:
         acc_steps = cfg["train"].get("accumulation_steps", 1)
         total_steps = cfg["train"]["iterations"]
         sched = CosineAnnealingLR(opt, T_max=total_steps // acc_steps, eta_min=cfg["train"].get("min_lr", 1e-7))
-        scaler = torch.cuda.amp.GradScaler(enabled=False)
+        scaler = None
 
         B, C, H, W = 2, cfg["model"].get("img_channel", 3), cfg["train"]["patch_size"], cfg["train"]["patch_size"]
         if H * W > 256 * 256:
@@ -293,7 +299,7 @@ def check_end2end(cfg: dict, model: nn.Module) -> None:
             x = torch.randn(B, C, H, W)
             tgt = torch.randn(B, C, H, W)
 
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.no_grad():
                 outputs = model(x, return_aux=True)
                 loss, logs = criterion(outputs, tgt)
                 loss = loss / acc_steps
