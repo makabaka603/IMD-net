@@ -1,0 +1,30 @@
+﻿# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Datasets (too large for git)
+dataset/
+
+# Checkpoints
+checkpoints/
+*.pth
+
+# ONNX export
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+_write_file.py
+
+_push.py
+__pycache__/
+*.pyc
