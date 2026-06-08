@@ -71,13 +71,29 @@ class IMDNetLoss(nn.Module):
         total = 0.0
         logs = {}
         c_total = e_total = f_total = 0.0
-        for p in preds:
-            # Multi-scale supervision: no interpolation needed
-            # side_outputs are now at their native scales
+
+        # Main output: restored image vs clean target (full resolution)
+        p0 = preds[0]
+        c = self.charb(p0, target)
+        e = self.edge(p0, target)
+        ff = self.fft(p0, target)
+        total = total + c + self.delta_edge * e + self.lambda_fft * ff
+        c_total += c.detach()
+        e_total += e.detach()
+        f_total += ff.detach()
+
+        # Side outputs: residual vs (downsample(target) - downsample(degraded))
+        degraded_img = outputs.get('degraded_img', None)
+        for p in preds[1:]:
             t = F.interpolate(target, size=p.shape[-2:], mode='bilinear', align_corners=False)
-            c = self.charb(p, t)
-            e = self.edge(p, t)
-            ff = self.fft(p, t)
+            if degraded_img is not None:
+                inp_down = F.interpolate(degraded_img, size=p.shape[-2:], mode='bilinear', align_corners=False)
+                residual_target = t - inp_down
+            else:
+                residual_target = t
+            c = self.charb(p, residual_target)
+            e = self.edge(p, residual_target)
+            ff = self.fft(p, residual_target)
             total = total + c + self.delta_edge * e + self.lambda_fft * ff
             c_total += c.detach()
             e_total += e.detach()

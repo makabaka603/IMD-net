@@ -84,10 +84,10 @@ class IMDNet(nn.Module):
             out, gates = dec(out, fused_di)
             dec_feats.append(out)
             gate_maps.extend(gates)
-            # Multi-scale side output with degraded input residual
+            # Side output: pure residual at native decoder scale.
+            # Loss function will compute residual target = downsample(target) - downsample(degraded_img).
             side = self.side_out[i](out)
-            side_input = F.interpolate(x, size=side.shape[-2:], mode='bilinear', align_corners=False)
-            side_outputs.append(side + side_input)
+            side_outputs.append(side)
             if i < len(self.up_after_stage):
                 out = self.up_after_stage[i](out)
 
@@ -99,6 +99,7 @@ class IMDNet(nn.Module):
             return {
                 'out': restored,
                 'side_outputs': side_outputs,
+                'degraded_img': x[:, :, :h, :w],
                 'cf_list': cf_list,
                 'di_list': di_list,
                 'gates': gate_maps,
