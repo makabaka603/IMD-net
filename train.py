@@ -177,8 +177,9 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
 
     tb_dir = "/root/tf-logs/imdnet"
-    os.makedirs(tb_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=tb_dir)
+    if is_main_process():
+        os.makedirs(tb_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=tb_dir) if is_main_process() else None
 
     batch_size_total = int(cfg["train"]["batch_size"])
     batch_size = max(1, batch_size_total // max(world_size, 1))
@@ -224,7 +225,11 @@ def main():
         ckpt = torch.load(args.resume, map_location=device)
 
         if isinstance(ckpt, dict) and "model" in ckpt:
-            model.load_state_dict(ckpt["model"], strict=False)
+            state_dict = ckpt["model"]
+            if all(k.startswith("module.") for k in state_dict.keys()):
+                state_dict = {k[7:]: v for k, v in state_dict.items()}
+            load_target = model.module if is_dist else model
+            load_target.load_state_dict(state_dict, strict=False)
             start_iter = int(ckpt.get("iter", 0))
             best_psnr = float(ckpt.get("best_psnr", -1.0))
 
@@ -256,10 +261,15 @@ def main():
         augment=False,
     )
 
+    if is_dist:
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=local_rank, shuffle=True)
+    else:
+        train_sampler = None
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
@@ -278,9 +288,11 @@ def main():
 
     optimizer.zero_grad(set_to_none=True)
 
-    pbar = tqdm(total=total_iters, initial=start_iter)
+    pbar = tqdm(total=total_iters, initial=start_iter, disable=not is_main_process())
 
     while it < total_iters:
+        if is_dist and train_sampler is not None:
+            train_sampler.set_epoch(it // max(len(train_loader), 1))
         for batch in train_loader:
             it += 1
 
@@ -310,15 +322,18 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
             current_lr = optimizer.param_groups[0]["lr"]
 
-            writer.add_scalar("train/loss_total", float(loss_log.detach().cpu()), it)
-            writer.add_scalar("train/loss_charbonnier", logs.get("charb", float("nan")), it)
-            writer.add_scalar("train/loss_edge", logs.get("edge", float("nan")), it)
-            writer.add_scalar("train/loss_fft", logs.get("fft", float("nan")), it)
-            writer.add_scalar("train/loss_decouple", logs.get("decouple", float("nan")), it)
-            writer.add_scalar("train/lr", current_lr, it)
+            if writer is not None:
+                writer.add_scalar("train/loss_total", float(loss_log.detach().cpu()), it)
+                writer.add_scalar("train/loss_charbonnier", logs.get("charb", float("nan")), it)
+                writer.add_scalar("train/loss_edge", logs.get("edge", float("nan")), it)
+                writer.add_scalar("train/loss_fft", logs.get("fft", float("nan")), it)
+                writer.add_scalar("train/loss_decouple", logs.get("decouple", float("nan")), it)
+                writer.add_scalar("train/lr", current_lr, it)
 
-            pbar.update(1)
-            pbar.set_description(
+            if not pbar.disable:
+                pbar.update(1)
+            if not pbar.disable:
+                pbar.set_description(
                 f"loss={float(loss_log.detach().cpu()):.4f} "
                 f"c={logs.get('charb', float('nan')):.4f} "
                 f"d={logs.get('decouple', float('nan')):.4f}"
@@ -327,9 +342,11 @@ def main():
             if it % val_every == 0:
                 val_psnr = validate(model, val_loader, device, writer=writer, step=it)
 
-                writer.add_scalar("val/psnr", val_psnr, it)
+                if writer is not None:
+                    writer.add_scalar("val/psnr", val_psnr, it)
 
-                print(f"\nIter {it}: val PSNR={val_psnr:.3f} dB")
+                if is_main_process():
+                    print(f"\nIter {it}: val PSNR={val_psnr:.3f} dB")
 
                 if val_psnr == val_psnr:
                     is_best = val_psnr > best_psnr
@@ -339,24 +356,25 @@ def main():
 
                     ckpt = {
                         "iter": it,
-                        "model": model.state_dict(),
+                        "model": model.module.state_dict() if is_dist else model.state_dict(),
                         "optim": optimizer.state_dict(),
                         "sched": scheduler.state_dict(),
                         "best_psnr": best_psnr,
                         "config": cfg,
                     }
 
-                    torch.save(ckpt, os.path.join(save_dir, "imdnet_latest.pth"))
+                    if is_main_process():
+                        torch.save(ckpt, os.path.join(save_dir, "imdnet_latest.pth"))
 
-                    if is_best:
+                    if is_best and is_main_process():
                         torch.save(ckpt, os.path.join(save_dir, "imdnet_best.pth"))
                         print(f"[INFO] best PSNR updated: {best_psnr:.3f} dB")
 
-            if it % save_every == 0:
+            if it % save_every == 0 and is_main_process():
                 torch.save(
                     {
                         "iter": it,
-                        "model": model.state_dict(),
+                        "model": model.module.state_dict() if is_dist else model.state_dict(),
                         "best_psnr": best_psnr,
                         "config": cfg,
                     },
@@ -366,8 +384,10 @@ def main():
             if it >= total_iters:
                 break
 
-    pbar.close()
-    writer.close()
+    if not pbar.disable:
+        pbar.close()
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":
