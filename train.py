@@ -262,7 +262,7 @@ def main():
     )
 
     if is_dist:
-        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=local_rank, shuffle=True)
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=dist.get_rank(), shuffle=True)
     else:
         train_sampler = None
     train_loader = DataLoader(
