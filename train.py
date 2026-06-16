@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import builtins
 
 import os
@@ -44,6 +44,26 @@ except Exception:
 from models import IMDNet
 from data import PairedImageDataset
 from utils import IMDNetLoss, psnr, set_seed
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+
+def is_main_process():
+    if not dist.is_available() or not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
+def setup_distributed():
+    if "WORLD_SIZE" not in os.environ or int(os.environ["WORLD_SIZE"]) <= 1:
+        return 0, 1, False
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", init_method="env://")
+    print(f"[DDP] rank={local_rank}, world_size={world_size}")
+    return local_rank, world_size, True
 
 
 def build_model(cfg):
@@ -150,7 +170,8 @@ def main():
 
     set_seed(cfg.get("seed", 123))
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    local_rank, world_size, is_dist = setup_distributed()
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
 
     save_dir = cfg.get("save_dir", "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
@@ -159,7 +180,8 @@ def main():
     os.makedirs(tb_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tb_dir)
 
-    batch_size = int(cfg["train"]["batch_size"])
+    batch_size_total = int(cfg["train"]["batch_size"])
+    batch_size = max(1, batch_size_total // max(world_size, 1))
     acc_steps = int(cfg["train"].get("accumulation_steps", 1))
     total_iters = int(cfg["train"]["iterations"])
     val_every = int(cfg["train"].get("val_every", 2000))
@@ -167,14 +189,16 @@ def main():
     num_workers = int(cfg["train"].get("num_workers", 4))
     clip_grad = float(cfg["train"].get("clip_grad", 1.0))
 
-    print(f"Device: {device}")
+    if is_main_process():
+        print(f"Device: {device}, world_size: {world_size}, per-GPU batch: {batch_size}, acc: {acc_steps}, effective: {batch_size * world_size * acc_steps}")
     print(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS')}")
     print(f"MKL_NUM_THREADS: {os.environ.get('MKL_NUM_THREADS')}")
     print(f"TensorBoard log dir: {tb_dir}")
     print(f"Effective batch size: {batch_size} x {acc_steps} = {batch_size * acc_steps}")
 
     model = build_model(cfg).to(device)
-
+    if is_dist:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
     criterion = IMDNetLoss(**cfg["loss"]).to(device)
 
     optimizer = Adam(
