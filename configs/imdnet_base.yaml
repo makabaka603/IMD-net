@@ -1,8 +1,10 @@
 seed: 123
+
 train_input_dir: datasets/MDIR/train/input
 train_target_dir: datasets/MDIR/train/target
 val_input_dir: datasets/MDIR/val/input
 val_target_dir: datasets/MDIR/val/target
+
 save_dir: checkpoints
 
 model:
@@ -16,15 +18,17 @@ model:
 
 train:
   patch_size: 256
-  batch_size: 4
-  accumulation_steps: 8     # effective batch = 4 x 8 = 32
+  batch_size: 2
+  accumulation_steps: 16
   num_workers: 4
   iterations: 400000
-  lr: 0.0002
-  min_lr: 0.0000001
+  lr: 2.0e-4
+  min_lr: 1.0e-7
   val_every: 2000
   save_every: 2000
-  amp: true
+  amp: false
+  clip_grad: 0.5
+  weight_decay: 0.0
 
 loss:
   lambda_fft: 0.1

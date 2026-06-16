@@ -25,12 +25,13 @@ class LayerNorm2d(nn.Module):
 
 
 class SCA(nn.Module):
-    """Simplified Channel Attention from NAFNet."""
+    """Simplified Channel Attention from NAFNet, with Sigmoid for stable training."""
     def __init__(self, channels: int):
         super().__init__()
         self.net = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels, 1, 1, 0)
+            nn.Conv2d(channels, channels, 1, 1, 0),
+            nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

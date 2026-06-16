@@ -1,366 +1,244 @@
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
-
-"""
-Quick sanity check for IMDNet training setup.
-
-Run this before launching a long training job to catch common issues:
-    - Missing data paths / config errors
-    - Model construction failures
-    - Data loading / augmentation errors
-    - Forward / backward pass crashes
-    - Loss computation and gradient flow
-
-Usage:
-    python sanity_check.py                                      # use default config
-    python sanity_check.py --config configs/imdnet_base.yaml    # custom config
-    python sanity_check.py --resume checkpoints/imdnet_best.pth # also load checkpoint
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
-
-"""
-
-import argparse
 import os
 import sys
-import time
+import argparse
+import traceback
+import py_compile
 from pathlib import Path
 
 import yaml
 import torch
-import torch.nn as nn
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-OK = "\033[92mOK\033[0m"
-FAIL = "\033[91mFAIL\033[0m"
-SKIP = "\033[93mSKIP\033[0m"
+from torch.utils.data import DataLoader
 
 
-def check(ok: bool, msg: str, detail: str = "") -> None:
-    """Print a check result."""
-    status = OK if ok else FAIL
-    print(f"  [{status}] {msg}")
-    if not ok and detail:
-        print(f"         {detail}")
+def check_compile(files):
+    print("\n========== 1. Check Python syntax ==========")
+    ok = True
+    for f in files:
+        if not Path(f).exists():
+            print(f"[WARN] Missing file: {f}")
+            continue
+        try:
+            py_compile.compile(f, doraise=True)
+            print(f"[OK] {f}")
+        except Exception as e:
+            ok = False
+            print(f"[FAIL] {f}")
+            print(e)
+    return ok
 
 
-def check_err(name: str, err: Exception) -> None:
-    """Print a formatted failure."""
-    print(f"  [{FAIL}] {name}")
-    print(f"         {type(err).__name__}: {err}")
-
-
-# ---------------------------------------------------------------------------
-# Checks
-# ---------------------------------------------------------------------------
-
-def check_python() -> None:
-    print("\n[Python environment]")
-    check(sys.version_info >= (3, 8), f"Python >= 3.8 (have {sys.version})")
-    check(torch.__version__ >= "2.0", f"torch >= 2.0 (have {torch.__version__})")
-    check(torch.cuda.is_available(), "CUDA available (will run on CPU if not)", "")
-    try:
-        import yaml  # noqa
-        check(True, "pyyaml installed")
-    except ImportError:
-        check(False, "pyyaml installed")
-    try:
-        from PIL import Image  # noqa
-        check(True, "Pillow installed")
-    except ImportError:
-        check(False, "Pillow installed")
-
-
-def check_config(path: str) -> dict:
-    print(f"\n[Config: {path}]")
-    path = Path(path)
-    check(path.exists(), f"Config file exists")
-    if not path.exists():
-        sys.exit(1)
-
-    with open(path, encoding="utf-8") as f:
+def load_config(config_path):
+    print("\n========== 2. Load YAML config ==========")
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    check(isinstance(cfg, dict), "Config parsed as dict")
 
-    # Required top-level keys
-    required = ["model", "train", "loss", "train_input_dir", "train_target_dir"]
-    for key in required:
-        check(key in cfg, f"Config has '{key}'")
+    if not isinstance(cfg, dict):
+        raise RuntimeError("YAML 配置读取失败：cfg 不是 dict，请检查 configs/imdnet_base.yaml 格式。")
 
-    if "model" in cfg:
-        m = cfg["model"]
-        for k in ["img_channel", "width", "enc_blk_nums"]:
-            check(k in m, f"  model.{k}")
-
-    if "train" in cfg:
-        t = cfg["train"]
-        for k in ["patch_size", "batch_size", "iterations", "lr"]:
-            check(k in t, f"  train.{k}")
-        if "accumulation_steps" in t:
-            check(t["accumulation_steps"] >= 1, "  train.accumulation_steps >= 1")
-        check(t.get("batch_size", 1) >= 1, "  train.batch_size >= 1")
-
-    if "loss" in cfg:
-        L = cfg["loss"]
-        for k in ["lambda_fft", "delta_edge", "gamma_decouple"]:
-            check(k in L, f"  loss.{k}")
-
+    print("[OK] Config loaded:", config_path)
+    print("Top-level keys:", list(cfg.keys()))
     return cfg
 
 
-def check_datasets(cfg: dict) -> None:
-    print("\n[Dataset paths]")
-    # Support both direct config keys and nested under dataset_root
-    for role in ["train_input_dir", "train_target_dir", "val_input_dir", "val_target_dir"]:
-        raw = cfg.get(role, "")
-        if not raw:
-            print(f"  [{SKIP}] {role}  (not configured)")
-            continue
-        p = Path(raw) if raw else Path(".")
-        exists = p.exists()
-        # Also try under a dataset_root if provided
-        if not exists and "dataset_root" in cfg:
-            alt = Path(cfg["dataset_root"]) / raw
-            check(alt.exists(), f"{role}  -> using dataset_root", str(alt))
-        else:
-            check(exists, f"{role}  {p.name if exists else ''}")
-            if exists:
-                files = list(p.rglob("*"))
-                exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-                img_files = [f for f in files if f.suffix.lower() in exts]
-                check(len(img_files) > 0, f"  has images ({len(img_files)} found)")
+def check_cuda():
+    print("\n========== 3. Check CUDA ==========")
+    print("torch version:", torch.__version__)
+    print("cuda available:", torch.cuda.is_available())
+    print("torch cuda version:", torch.version.cuda)
+
+    if torch.cuda.is_available():
+        print("gpu:", torch.cuda.get_device_name(0))
+        mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"gpu memory: {mem:.2f} GB")
+        return torch.device("cuda")
+
+    print("[WARN] CUDA 不可用，将使用 CPU 测试。正式训练必须保证 CUDA 可用。")
+    return torch.device("cpu")
 
 
-def check_model(cfg: dict) -> nn.Module:
-    print("\n[Model construction]")
-    try:
-        from models import IMDNet
+def check_dirs(cfg):
+    print("\n========== 4. Check dataset paths ==========")
+    required = [
+        "train_input_dir",
+        "train_target_dir",
+        "val_input_dir",
+        "val_target_dir",
+    ]
 
-        model = IMDNet(**cfg["model"])
-        total = sum(p.numel() for p in model.parameters())
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    for k in required:
+        if k not in cfg:
+            raise KeyError(f"配置文件缺少字段：{k}")
+        p = Path(cfg[k])
+        print(f"{k}: {p}")
+        if not p.exists():
+            raise FileNotFoundError(f"路径不存在：{p}")
 
-        # Count params in M
-        total_m = total / 1e6
-        trainable_m = trainable / 1e6
-        check(True, f"IMDNet created  ({total_m:.2f}M params, {trainable_m:.2f}M trainable)")
+    train_input_count = len(list(Path(cfg["train_input_dir"]).glob("*")))
+    train_target_count = len(list(Path(cfg["train_target_dir"]).glob("*")))
+    val_input_count = len(list(Path(cfg["val_input_dir"]).glob("*")))
+    val_target_count = len(list(Path(cfg["val_target_dir"]).glob("*")))
 
-        # Quick forward pass to catch shape errors
-        device = "cpu"
-        model = model.to(device)
-        B, C, H, W = 1, cfg["model"].get("img_channel", 3), 64, 64
-        x = torch.randn(B, C, H, W)
-        with torch.no_grad():
-            outputs = model(x, return_aux=True)
+    print("train input files:", train_input_count)
+    print("train target files:", train_target_count)
+    print("val input files:", val_input_count)
+    print("val target files:", val_target_count)
 
-        check("out" in outputs, "  forward returns 'out'")
-        check(outputs["out"].shape == (B, C, H, W), f"  out shape {outputs['out'].shape}")
-        check("side_outputs" in outputs, "  forward returns 'side_outputs'")
-        n_side = len(outputs["side_outputs"])
-        check(n_side > 0, f"  {n_side} side outputs")
-        for i, s in enumerate(outputs["side_outputs"]):
-            check(s.shape[1] == C, f"  side[{i}] channel={s.shape[1]}")
-        check("degraded_img" in outputs, "  forward returns 'degraded_img'")
-        check("cf_list" in outputs, "  forward returns 'cf_list'")
-        check("di_list" in outputs, "  forward returns 'di_list'")
-
-        return model
-    except Exception as e:
-        check_err("Model construction / forward", e)
-        sys.exit(1)
+    if train_input_count == 0 or train_target_count == 0:
+        raise RuntimeError("训练集 input 或 target 为空，请先检查数据是否放对。")
 
 
-def check_loss(model: nn.Module, cfg: dict) -> None:
-    print("\n[Loss + backward]")
-    try:
-        from utils.losses import IMDNetLoss
-
-        device = "cpu"
-        model = model.to(device)
-        criterion = IMDNetLoss(**cfg["loss"])
-
-        B, C, H, W = 2, cfg["model"].get("img_channel", 3), 64, 64
-        x = torch.randn(B, C, H, W)
-        tgt = torch.randn(B, C, H, W)
-
-        outputs = model(x, return_aux=True)
-        loss, logs = criterion(outputs, tgt)
-
-        check(torch.isfinite(loss), f"Loss is finite  ({loss.item():.4f})")
-        for key in ["charb", "edge", "fft", "decouple"]:
-            v = logs.get(key, float("nan"))
-            check(torch.isfinite(torch.tensor(v)), f"  {key}={v:.4f}")
-
-        # Backward pass
-        loss.backward()
-        has_grad = False
-        for name, p in model.named_parameters():
-            if p.grad is not None:
-                has_grad = True
-                if not torch.isfinite(p.grad).all():
-                    check(False, f"  Gradient NaN/Inf in {name}")
-                break
-        check(has_grad, "  Gradients flow through all layers")
-
-    except Exception as e:
-        check_err("Loss / backward", e)
-        sys.exit(1)
-
-
-def check_dataloader(cfg: dict) -> None:
-    print("\n[DataLoader]")
-    try:
-        from data import PairedImageDataset
-        from torch.utils.data import DataLoader
-
-        patch_size = cfg["train"]["patch_size"]
-        batch_size = min(cfg["train"]["batch_size"], 4)  # small for speed
-
-        # Try train set
-        train_dir = cfg.get("train_input_dir", "")
-        target_dir = cfg.get("train_target_dir", "")
-        if not train_dir or not target_dir:
-            print(f"  [{SKIP}] train set  (paths not configured)")
-            return
-
-        ds = PairedImageDataset(train_dir, target_dir, patch_size=patch_size, augment=True)
-        check(len(ds) > 0, f"Train dataset: {len(ds)} pairs")
-
-        dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0)
-        batch = next(iter(dl))
-        check("input" in batch, "  batch has 'input'")
-        check("target" in batch, "  batch has 'target'")
-        check(batch["input"].shape == (batch_size, 3, patch_size, patch_size),
-              f"  input shape {list(batch['input'].shape)}")
-        check(batch["target"].shape == (batch_size, 3, patch_size, patch_size),
-              f"  target shape {list(batch['target'].shape)}")
-        check(torch.isfinite(batch["input"]).all(), "  input values are finite")
-        check(torch.isfinite(batch["target"]).all(), "  target values are finite")
-
-    except Exception as e:
-        check_err("Dataloader", e)
-
-
-def check_resume(cfg: dict, resume_path: str) -> None:
-    print("\n[Checkpoint loading]")
-    try:
-        from models import IMDNet
-
-        path = Path(resume_path)
-        check(path.exists(), f"Checkpoint exists: {resume_path}")
-        if not path.exists():
-            return
-
-        ckpt = torch.load(resume_path, map_location="cpu", weights_only=True)
-        check("model" in ckpt or any(k.endswith("weight") for k in ckpt.keys()),
-              "Checkpoint contains model weights")
-
-        model = IMDNet(**cfg["model"])
-        state = ckpt["model"] if "model" in ckpt else ckpt
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        check(len(missing) == 0, f"No missing keys  ({len(missing)} missing)")
-        check(len(unexpected) == 0, f"No unexpected keys  ({len(unexpected)} unexpected)")
-
-        if "optim" in ckpt:
-            check(True, "Checkpoint has optimizer state")
-        if "iter" in ckpt:
-            check(True, f"Checkpoint at iteration {ckpt['iter']}")
-
-    except Exception as e:
-        check_err("Checkpoint loading", e)
-
-
-def check_end2end(cfg: dict, model: nn.Module) -> None:
-    """Simulate a few training steps with AMP and gradient accumulation."""
-    print("\n[End-to-end training step (2 iterations)]")
-    try:
-        from utils.losses import IMDNetLoss
-        from torch.optim import Adam
-        from torch.optim.lr_scheduler import CosineAnnealingLR
-
-        device = "cpu"
-        model = model.to(device)
-        criterion = IMDNetLoss(**cfg["loss"])
-        opt = Adam(model.parameters(), lr=cfg["train"]["lr"])
-        acc_steps = cfg["train"].get("accumulation_steps", 1)
-        total_steps = cfg["train"]["iterations"]
-        sched = CosineAnnealingLR(opt, T_max=total_steps // acc_steps, eta_min=cfg["train"].get("min_lr", 1e-7))
-        scaler = None
-
-        B, C, H, W = 2, cfg["model"].get("img_channel", 3), cfg["train"]["patch_size"], cfg["train"]["patch_size"]
-        if H * W > 256 * 256:
-            H, W = 128, 128
-
-        t0 = time.time()
-        for step in range(2):
-            x = torch.randn(B, C, H, W)
-            tgt = torch.randn(B, C, H, W)
-
-            with torch.no_grad():
-                outputs = model(x, return_aux=True)
-                loss, logs = criterion(outputs, tgt)
-                loss = loss / acc_steps
-
-            scaler.scale(loss).backward()
-
-            if (step + 1) % acc_steps == 0:
-                scaler.unscale_(opt)
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(opt)
-                scaler.update()
-                sched.step()
-                opt.zero_grad(set_to_none=True)
-
-        elapsed = time.time() - t0
-        check(True, f"2 training steps completed in {elapsed:.1f}s")
-        check(torch.isfinite(loss), f"Loss stable during training  ({loss.item():.4f})")
-
-        # Estimate total training time
-        total_iters = cfg["train"]["iterations"]
-        est_hours = elapsed / 2 * total_iters / 3600
-        check(True, f"Estimated total: {est_hours:.0f}h ({elapsed/2*1000:.0f}ms / iter)")
-
-    except Exception as e:
-        check_err("End-to-end", e)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Quick sanity check for IMDNet training.")
-    parser.add_argument("--config", default="configs/imdnet_base.yaml", help="Config file path.")
-    parser.add_argument("--resume", default="", help="Optional checkpoint to verify loading.")
-    parser.add_argument("--quick", action="store_true", help="Skip slow checks (dataloader, e2e).")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/imdnet_base.yaml")
+    parser.add_argument("--patch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--random_only", action="store_true",
+                        help="不读数据，直接用随机张量测试模型 forward/backward。")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("  IMDNet Sanity Check")
-    print("=" * 60)
+    critical_files = [
+        "train.py",
+        "infer.py",
+        "evaluate.py",
+        "evaluate_mdir.py",
+        "models/imdnet.py",
+        "models/didblock.py",
+        "models/tablock.py",
+        "models/fblock.py",
+        "models/dynamic_filter.py",
+        "models/layers.py",
+        "data/paired_dataset.py",
+        "utils/losses.py",
+    ]
 
-    check_python()
-    cfg = check_config(args.config)
-    check_datasets(cfg)
-    model = check_model(cfg)
+    compile_ok = check_compile(critical_files)
+    if not compile_ok:
+        print("\n[STOP] 有 Python 文件语法检查失败。请先修复代码换行/语法问题，再训练。")
+        sys.exit(1)
 
-    if not args.quick:
-        check_dataloader(cfg)
-        check_loss(model, cfg)
-        check_end2end(cfg, model)
+    cfg = load_config(args.config)
+    device = check_cuda()
+
+    print("\n========== 5. Import project modules ==========")
+    try:
+        from models import IMDNet
+        from utils import IMDNetLoss
+        print("[OK] Imported IMDNet and IMDNetLoss")
+    except Exception:
+        print("[FAIL] 项目模块导入失败。错误如下：")
+        traceback.print_exc()
+        sys.exit(1)
+
+    model_cfg = cfg.get("model", {})
+    loss_cfg = cfg.get("loss", {})
+
+    print("\n========== 6. Build model and loss ==========")
+    model = IMDNet(**model_cfg).to(device)
+    criterion = IMDNetLoss(**loss_cfg).to(device)
+
+    param_count = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"[OK] Model built. Params: {param_count:.2f} M")
+
+    if args.random_only:
+        print("\n========== 7. Random tensor test ==========")
+        x = torch.rand(args.batch_size, 3, args.patch_size, args.patch_size, device=device)
+        y = torch.rand(args.batch_size, 3, args.patch_size, args.patch_size, device=device)
+        names = ["random_tensor"]
     else:
-        check_loss(model, cfg)
-        print(f"\n  [{SKIP}] Dataloader + end-to-end  (--quick mode)")
+        check_dirs(cfg)
+        print("\n========== 7. Load one mini-batch ==========")
+        try:
+            from data import PairedImageDataset
 
-    if args.resume:
-        check_resume(cfg, args.resume)
+            dataset = PairedImageDataset(
+                cfg["train_input_dir"],
+                cfg["train_target_dir"],
+                patch_size=args.patch_size,
+                augment=True,
+            )
 
-    print("\n" + "=" * 60)
-    print("  Sanity check complete.")
-    print("=" * 60)
+            loader = DataLoader(
+                dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=torch.cuda.is_available(),
+            )
+
+            batch = next(iter(loader))
+            x = batch["input"].to(device, non_blocking=True)
+            y = batch["target"].to(device, non_blocking=True)
+            names = batch.get("name", ["unknown"])
+
+            print("[OK] Batch loaded")
+            print("names:", names[:3] if isinstance(names, list) else names)
+        except Exception:
+            print("[FAIL] 数据读取失败。错误如下：")
+            traceback.print_exc()
+            sys.exit(1)
+
+    print("input shape:", tuple(x.shape))
+    print("target shape:", tuple(y.shape))
+    print("input min/max:", float(x.min()), float(x.max()))
+    print("target min/max:", float(y.min()), float(y.max()))
+
+    print("\n========== 8. Forward + loss + backward ==========")
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, betas=(0.9, 0.999))
+
+    try:
+        optimizer.zero_grad(set_to_none=True)
+
+        outputs = model(x, return_aux=True)
+        loss, logs = criterion(outputs, y)
+
+        print("[OK] Forward success")
+        print("main output shape:", tuple(outputs["out"].shape))
+        print("side output shapes:", [tuple(s.shape) for s in outputs.get("side_outputs", [])])
+        print("cf shapes:", [tuple(t.shape) for t in outputs.get("cf_list", [])])
+        print("di shapes:", [tuple(t.shape) for t in outputs.get("di_list", [])])
+        print("loss:", float(loss.detach()))
+        print("logs:", logs)
+
+        if not torch.isfinite(loss):
+            raise RuntimeError("loss 出现 NaN 或 Inf。")
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+        print("[OK] Backward + optimizer step success")
+
+    except RuntimeError as e:
+        print("[FAIL] Forward/backward 失败。错误如下：")
+        print(e)
+
+        if "out of memory" in str(e).lower():
+            print("\n显存不足处理建议：")
+            print("1. 先用 --patch_size 64")
+            print("2. 或者 --batch_size 1")
+            print("3. 正式训练时再逐步调回 patch_size=256")
+        sys.exit(1)
+
+    print("\n========== 9. Save temporary checkpoint ==========")
+    save_dir = Path("checkpoints_sanity")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = save_dir / "sanity_test.pth"
+
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "config": cfg,
+            "loss": float(loss.detach().cpu()),
+        },
+        ckpt_path,
+    )
+
+    print("[OK] Checkpoint saved:", ckpt_path)
+
+    print("\n========== Sanity check finished ==========")
+    print("结果：临时测试通过，可以开始短训练。")
 
 
 if __name__ == "__main__":
