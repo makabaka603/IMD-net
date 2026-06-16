@@ -199,7 +199,7 @@ def main():
 
     model = build_model(cfg).to(device)
     if is_dist:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     criterion = IMDNetLoss(**cfg["loss"]).to(device)
 
     optimizer = Adam(
@@ -339,7 +339,7 @@ def main():
                 f"d={logs.get('decouple', float('nan')):.4f}"
             )
 
-            if it % val_every == 0:
+            if it % val_every == 0 and is_main_process():
                 val_psnr = validate(model, val_loader, device, writer=writer, step=it)
 
                 if writer is not None:
