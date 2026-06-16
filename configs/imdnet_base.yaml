@@ -1,35 +1,38 @@
 seed: 123
-
-train_input_dir: datasets/MDIR/train/input
-train_target_dir: datasets/MDIR/train/target
-val_input_dir: datasets/MDIR/val/input
-val_target_dir: datasets/MDIR/val/target
-
-save_dir: checkpoints
-
+train_input_dir: /root/autodl-tmp/datasets/MDIR/train/input
+train_target_dir: /root/autodl-tmp/datasets/MDIR/train/target
+val_input_dir: /root/autodl-tmp/datasets/MDIR/val/input
+val_target_dir: /root/autodl-tmp/datasets/MDIR/val/target
+save_dir: /root/autodl-tmp/projects/IMD-net/checkpoints
 model:
   img_channel: 3
   width: 32
-  enc_blk_nums: [4, 4, 4, 8]
+  enc_blk_nums:
+  - 4
+  - 4
+  - 4
+  - 8
   middle_blk_num: 8
-  dec_blk_nums: [2, 2, 2, 2]
+  dec_blk_nums:
+  - 2
+  - 2
+  - 2
+  - 2
   branch_num: 4
   tau: 0.2
-
 train:
   patch_size: 256
-  batch_size: 2
-  accumulation_steps: 16
+  batch_size: 4
+  accumulation_steps: 8
   num_workers: 4
-  iterations: 400000
-  lr: 2.0e-4
-  min_lr: 1.0e-7
+  iterations: 800000
+  lr: 0.0002
+  min_lr: 1.0e-07
   val_every: 2000
   save_every: 2000
   amp: false
   clip_grad: 0.5
   weight_decay: 0.0
-
 loss:
   lambda_fft: 0.1
   delta_edge: 0.05

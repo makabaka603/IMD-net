@@ -1,4 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
+import builtins
 
 import os
 import re
@@ -69,11 +70,11 @@ def float(x):
     try:
         if isinstance(x, torch.Tensor):
             if torch.isfinite(x).all():
-                return float(x.detach().cpu())
-            return float("nan")
-        return float(x)
+                return builtins.float(x.detach().cpu())
+            return builtins.float("nan")
+        return builtins.float(x)
     except Exception:
-        return float("nan")
+        return builtins.float("nan")
 
 
 def log_images(writer, inp, pred, tgt, step):
@@ -137,7 +138,7 @@ def validate(model, loader, device, writer=None, step=0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="imdnet_base.yaml")
+    parser.add_argument("--config", type=str, default="configs/imdnet_base.yaml")
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--resume_full", action="store_true")
     args = parser.parse_args()
