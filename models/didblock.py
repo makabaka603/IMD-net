@@ -69,6 +69,7 @@ class DIDBlock(nn.Module):
         fh, fl = self.df(e)
 
         coeff = (self.sc_h(fh) + self.sc_l(fl) + self.sc_e(e)) / 6.0
+        coeff = torch.tanh(coeff)
 
         di = coeff * e
         cf = e - di
