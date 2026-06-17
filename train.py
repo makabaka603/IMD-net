@@ -305,18 +305,14 @@ def main():
                 out = outputs["out"] if isinstance(outputs, dict) else outputs
 
                 if not torch.isfinite(out).all():
-                    print(f"\n[NaN DIAG] iter={it}: NaN in main output!", flush=True)
+                    print(f"\n[NaN DIAG] iter={it}: NaN in main output! min={out.min():.2e} max={out.max():.2e}", flush=True)
+                elif out.abs().max() > 1e4:
+                    print(f"\n[VAL DIAG] iter={it}: output too large! min={out.min():.2e} max={out.max():.2e}", flush=True)
 
                 if isinstance(outputs, dict):
-                    for j, side in enumerate(outputs.get("side_outputs", [])):
-                        if not torch.isfinite(side).all():
-                            print(f"[NaN DIAG] iter={it}: NaN in side_output[{j}]", flush=True)
-                    for j, cf in enumerate(outputs.get("cf_list", [])):
-                        if not torch.isfinite(cf).all():
-                            print(f"[NaN DIAG] iter={it}: NaN in cf_list[{j}]", flush=True)
-                    for j, di in enumerate(outputs.get("di_list", [])):
-                        if not torch.isfinite(di).all():
-                            print(f"[NaN DIAG] iter={it}: NaN in di_list[{j}]", flush=True)
+                    for j, di_val in enumerate(outputs.get("di_list", [])):
+                        if di_val.abs().max() > 1e2:
+                            print(f"[VAL DIAG] iter={it}: di[{j}] too large! max={di_val.abs().max():.2e}", flush=True)
 
                 loss, logs = criterion(outputs, tgt)
 
