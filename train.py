@@ -302,7 +302,26 @@ def main():
             with torch.cuda.amp.autocast(enabled=use_amp):
                 outputs = model(inp, return_aux=True)
 
+                out = outputs["out"] if isinstance(outputs, dict) else outputs
+
+                if not torch.isfinite(out).all():
+                    print(f"\n[NaN DIAG] iter={it}: NaN in main output!", flush=True)
+
+                if isinstance(outputs, dict):
+                    for j, side in enumerate(outputs.get("side_outputs", [])):
+                        if not torch.isfinite(side).all():
+                            print(f"[NaN DIAG] iter={it}: NaN in side_output[{j}]", flush=True)
+                    for j, cf in enumerate(outputs.get("cf_list", [])):
+                        if not torch.isfinite(cf).all():
+                            print(f"[NaN DIAG] iter={it}: NaN in cf_list[{j}]", flush=True)
+                    for j, di in enumerate(outputs.get("di_list", [])):
+                        if not torch.isfinite(di).all():
+                            print(f"[NaN DIAG] iter={it}: NaN in di_list[{j}]", flush=True)
+
                 loss, logs = criterion(outputs, tgt)
+
+                if not torch.isfinite(loss):
+                    print(f"[NaN DIAG] iter={it}: NaN in loss! loss={loss.item()}", flush=True)
                 loss_log = loss.detach()
                 loss = loss / acc_steps
 
